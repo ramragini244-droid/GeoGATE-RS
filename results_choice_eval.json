@@ -1,0 +1,77 @@
+[
+  {
+    "image_id": "FAIR1M/295.tif",
+    "ground_truth": "B",
+    "candidate": "B"
+  },
+  {
+    "image_id": "FAIR1M/96.tif",
+    "ground_truth": "C",
+    "candidate": "C"
+  },
+  {
+    "image_id": "FAIR1M/541.tif",
+    "ground_truth": "B",
+    "candidate": "B"
+  },
+  {
+    "image_id": "FAIR1M/223.tif",
+    "ground_truth": "B",
+    "candidate": "C"
+  },
+  {
+    "image_id": "FAIR1M/274.tif",
+    "ground_truth": "C",
+    "candidate": "B"
+  },
+  {
+    "image_id": "FAIR1M/187.tif",
+    "ground_truth": "B",
+    "candidate": "B"
+  },
+  {
+    "image_id": "FAIR1M/138.tif",
+    "ground_truth": "D",
+    "candidate": "D"
+  },
+  {
+    "image_id": "FAIR1M/239.tif",
+    "ground_truth": "B",
+    "candidate": "B"
+  },
+  {
+    "image_id": "FAIR1M/472.tif",
+    "ground_truth": "B",
+    "candidate": "B"
+  },
+  {
+    "image_id": "FAIR1M/212.tif",
+    "ground_truth": "B",
+    "candidate": "B"
+  },
+  {
+    "image_id": "FAIR1M/4.tif",
+    "ground_truth": "C",
+    "candidate": "C"
+  },
+  {
+    "image_id": "FAIR1M/383.tif",
+    "ground_truth": "B",
+    "candidate": "B"
+  },
+  {
+    "image_id": "FAIR1M/478.tif",
+    "ground_truth": "B",
+    "candidate": "B"
+  },
+  {
+    "image_id": "FAIR1M/5.tif",
+    "ground_truth": "B",
+    "candidate": "B"
+  },
+  {
+    "image_id": "FAIR1M/104.tif",
+    "ground_truth": "D",
+    "candidate": "B"
+  }
+]

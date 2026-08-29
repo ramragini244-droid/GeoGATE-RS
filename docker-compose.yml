@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  mycpm:
+    image: mycpm:1.0
+    container_name: mycpm_v1
+    ports:
+      - "8501:8501"
+    volumes:
+      - /home/user01/PythonProject/CPM-9G-8B/FM9G4B-V/checkpoint/:/root/project/checkpoint  # 挂载当前目录下的your-local-dir到容器内的/app/data
+      - /home/user01/PythonProject/CPM-9G-8B/FM9G4B-V/config/:/root/project/config  # 挂载当前目录下的your-local-dir到容器内的/app/data
+    # restart: unless-stopped
+    environment:    
+      - NVIDIA_VISIBLE_DEVICES=all
+    runtime: nvidia
+    tty: true
+    stdin_open: true
+

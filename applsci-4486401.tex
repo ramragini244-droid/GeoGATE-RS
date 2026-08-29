@@ -1,0 +1,679 @@
+\documentclass[applsci,article,accept,moreauthors]{Definitions/mdpi}
+
+\setlength{\headheight}{20pt}
+\newcommand{\LN}{\operatorname{LN}}
+\newcommand{\softmax}{\operatorname{softmax}}
+\newcommand{\Normalize}{\operatorname{Normalize}}
+
+\usepackage{amssymb}
+\usepackage[OT1]{fontenc}
+
+\firstpage{1} 
+\makeatletter 
+\setcounter{page}{\@firstpage} 
+\makeatother
+\pubvolume{1}
+\issuenum{1}
+\articlenumber{0}
+\pubyear{2026}
+\copyrightyear{2026}
+\externaleditor{Firstname Lastname} 
+\datereceived{ } 
+\daterevised{ } 
+\dateaccepted{ } 
+\datepublished{ } 
+
+\Title{GeoGATE: Geo-Sensor-Guided Adaptive Token and \linebreak Evidence Reasoning for High-Resolution Remote Sensing \linebreak Image \highlighting{Understanding}
+}
+\Author{\hl{Jingnan}
+ Zhang and Fengjun Zhang *}
+\AuthorNames{Jingnan Zhang and Fengjun Zhang}
+
+\address[1]{%
+School of Computer Science, Jiangsu University of Science and Technology, Zhenjiang 212100, China;
+ zjnjingnan@foxmail.com}
+\corres{\hangafter=1 \hangindent=1.05em \hspace{-0.82em}Correspondence: jszhfj@nuaa.edu.cn}
+
+
+\featuredapplication{GeoGATE is designed for high-resolution remote sensing captioning, visual question answering, and visual grounding. The current experiments validate these single-image tasks on VRSBench; multi-temporal change analysis, cross-sensor transfer, disaster assessment, and environmental monitoring remain intended extensions rather than empirically established deployment capabilities. LoRA adaptation and NF4 inference reduce adaptation and memory requirements for practical evaluation.}
+
+\abstract{High-resolution remote sensing understanding requires models to preserve small spatial evidence, account for acquisition-dependent appearance, and separate genuine geographic change from nuisance variation. We introduce GeoGATE, a geo-sensor-guided framework that combines typed acquisition conditioning, budget-constrained adaptive token acquisition, metadata-compatible evidence retrieval, and reliability-aware temporal reasoning. LoRA adaptation and NF4 quantization support efficient training and deployment. On the VRSBench test split, GeoGATE reaches 53.4 BLEU-1, 36.8 BLEU-2, 18.2 BLEU-4, 56.4 Acc@0.5, 82.3 VQA, 25.1 METEOR, and 42.6 ROUGE-L, outperforming the controlled GeoGATE (Base) configuration across captioning, question answering, and grounding. Component ablations associate adaptive slicing most strongly with localization, retrieval with language and VQA, and language model adaptation with all reported tasks. NF4 reduces measured video memory from 24.5 GiB to 7.2 GiB with only minor metric changes. These experiments support the single-image language and grounding components. Dedicated cross-sensor and bi-temporal benchmarks are not reported; the corresponding modules are therefore presented as architectural extensions rather than validated performance claims.}
+
+\keyword{remote sensing image understanding; multimodal large language model; geo-sensor conditioning; adaptive token acquisition; retrieval-augmented generation; visual grounding; multi-temporal reasoning; NF4 quantization}
+
+\begin{document}
+
+\section{Introduction}
+
+Remote sensing imagery supports environmental monitoring, urban planning, agriculture, disaster response, and~infrastructure management. Unlike natural images, Earth-observation data are acquired by heterogeneous sensors and at widely varying spatial resolutions. A~target may occupy only a few pixels, appear under different spectral or backscatter characteristics, or~change its apparent geometry with viewing angle and registration error. A~useful multimodal model must therefore connect semantic reasoning with sensor physics and spatial evidence rather than treat the image as an undifferentiated visual token~sequence.
+
+Benchmark resources such as FAIR1M \citep{ref1} and BRIGHT \citep{ref2} establish representative high-resolution and disaster-response settings. Vision-language pretraining has established strong foundations for image-text alignment \citep{ref3,ref4,ref5,ref6,ref7}, while GeoChat \citep{ref8}, EarthGPT \citep{ref9}, RS-LLaVA \citep{ref10}, VRSBench \citep{ref11}, \linebreak RSTeller \citep{ref12}, SkyEyeGPT \citep{ref13}, and~subsequent remote sensing models \citep{ref14,ref15,ref16,ref17,ref18,ref19,ref20,ref21,ref22} have extended this paradigm to Earth observation. These systems demonstrate broad task coverage, but~three limitations remain consequential for high-resolution analysis. First, global resizing suppresses small or densely packed objects. Second, sensor and acquisition metadata are often supplied as optional prose rather than structured conditions. Third, generated answers may be semantically plausible without traceable visual or external~evidence.
+
+The three limitations are coupled. Increasing image resolution without selective token allocation creates prohibitive sequence and memory costs, adding more visual tokens without sensor context does not resolve cross-modality ambiguity, and retrieval without spatial grounding can introduce evidence that is relevant to the query but inconsistent with the observed scene. Multi-temporal interpretation adds a further difficulty because clouds, illumination, seasonality, registration, and~modality changes can imitate structural change. Consequently, a~successful architecture must control what visual evidence is retained, how that evidence is conditioned, and~when external or temporal evidence is~trusted.
+
+GeoGATE addresses this coupled problem through a single task-conditioned pipeline. It first encodes sensor, modality, resolution, location, time, quality, and~task metadata. It then allocates a bounded visual-token budget to globally representative and locally informative regions. Finally, it retrieves compatible remote sensing knowledge and applies a temporal reliability gate when multiple observations are present. The~same interface produces natural-language and structured spatial outputs, allowing generation quality and visual grounding to be evaluated~together.
+
+The main contributions are~fourfold:
+
+\begin{itemize}
+\item We formulate high-resolution remote sensing multimodal reasoning over imagery, typed geo-sensor fields, task instructions, and~optional source-linked evidence, and~define how each input enters the model.
+
+\item We develop a coarse-to-fine adaptive token acquisition strategy that scores candidate layouts and regions under a fixed token budget, preserving small-object and boundary evidence without dense full-resolution encoding.
+
+\item We introduce two independent mechanisms: metadata-compatible retrieval for source-linked contextual evidence and~a reliability gate for aligned bi-temporal differences. Retrieved text does not determine the temporal gate.
+
+\item We evaluate captioning, VQA, grounding, component ablation, qualitative localization, and~quantized deployment on VRSBench. Cross-sensor transfer and change detection are explicitly excluded from the present empirical claims.
+\end{itemize}
+
+\section{GeoGATE~Framework}
+
+
+\subsection{Overview}
+
+Let $X$ denote one image or an ordered set of co-registered Earth-observation images indexed by $t = 1, \ldots, T$; let $q$ be the task instruction, $m$ be the acquisition metadata, and~$K$ be an optional external knowledge collection. GeoGATE organizes prediction into four inspectable stages: typed geo-sensor conditioning, budgeted visual-evidence acquisition, metadata-compatible retrieval, and~task decoding. Figure~\ref{fig1} shows the architecture. The~image and retrieval branches remain separate until fusion, allowing metadata compatibility to constrain each branch without allowing retrieved text to override visual evidence. Equation~(1) states the end-to-end map; Equation~(2) embeds sensor, modality, ground sampling distance, region, time, quality, and~task as typed fields; and Equation~(3) modulates visual tokens and adds normalized coordinates and physical scale. Figure~\ref{fig2} distinguishes global, selected local, condition, and~retrieved-evidence tokens. Figure~\ref{fig3} summarizes the supported output interfaces. Only captioning, VQA, and~grounding are quantitatively evaluated in the present study.
+\begin{equation}
+\hat{y}\  = \ F_{\Theta(X,\ q,\ m,\ K)} = \ Dec\left( \left[ Z_{g};\ Z_{l};\ C_{m};\ E_{K};\ Q \right] \right)\
+\label{eq1}
+\end{equation}
+\begin{equation}
+C_{m} = \ E_{s(s)} + \ E_{\mu(\mu)} + \ E_{\rho\left( \log\rho \right)} + \ E_{g(g)} + \ E_{t(t)} + \ E_{u(u)} + \ E_{\tau(\tau)}\
+\label{eq2}
+\end{equation}
+\begin{equation}
+z_{i}' = \ \gamma\left( C_{m} \right) \odot \ LN\left( z_{i} \right) + \ \beta\left( C_{m} \right) + \ W_{p}p_{i} + W_{\rho}\log\rho\
+\label{eq3}
+\end{equation}
+\vspace{-12pt}
+
+\begin{figure}[H]
+
+\includegraphics[width=\textwidth]{figures/figure1.jpeg}
+\caption{Overall \textls[-15]{GeoGATE architecture integrating geo-sensor conditioning, adaptive high-resolution token acquisition, metadata-aware evidence retrieval, and~task-specific multimodal~generation}. The~diagram shows the visual, retrieval, text/task, and~fusion/model paths together with their task outputs.\label{fig1}}
+\end{figure}
+\vspace{-10pt}
+
+\begin{figure}[H]
+
+\includegraphics[width=\textwidth]{figures/figure2.png}
+\caption{GeoGATE input representation and multimodal processing pipeline, including image slicing, visual encoding, condition tokens, textual instructions, and~the task~decoder. Arrows indicate processing flow; blue arrows connect the major stages, vertical arrows show within-stage encoding, and~the dotted arrow denotes instruction-driven adaptive routing. Colored boxes distinguish visual encoding, text tokenization, adaptive routing, and~multimodal model fusion.\label{fig2}}
+\end{figure}
+
+
+\begin{figure}[H]
+
+\includegraphics[width=\textwidth]{figures/figure3.png}
+\caption{Task coverage of GeoGATE across scene understanding, captioning, visual grounding, VQA, multi-temporal change analysis, and~disaster~assessment. Arrows indicate the flow from multimodal inputs through unified encoding and GeoGATE to task outputs; orange panels denote general vision-language tasks, lavender panels temporal understanding, and pale-yellow panels specialized remote-sensing tasks.\label{fig3}}
+\end{figure}
+
+
+\subsection{Adaptive Token Acquisition for High-Resolution~Imagery}
+
+High-resolution remote sensing images contain a scale asymmetry that is uncommon in ordinary photographs: scene context may span kilometers, while a target of interest occupies only a few pixels. Uniform resizing reduces computation but irreversibly removes evidence; dense tiling preserves evidence but makes attention cost grow with many redundant patches. GeoGATE treats tokenization as constrained evidence acquisition. A~global pass supplies scene context and candidate regions, and~a local pass allocates the remaining budget to regions whose physical scale, task relevance, objectness, boundary complexity, or~uncertainty warrants additional~resolution.
+
+For image and encoder resolutions of $H \times W$, and~a maximum of $M$ local tiles, Equation~(4) defines the feasible grid set. Equation~(5) selects the layout that maximizes effective coverage and information balance while penalizing target-boundary cuts. Candidate region $r$ is then assigned the task-aware utility in Equation~(6), where the four terms measure instruction similarity, object evidence, edge density, and~predictive entropy. Finally, Equation~(7) solves a binary budgeted selection problem. The~result is a direct derivation from remote sensing requirements: small or uncertain objects receive more pixels, but~no image can exceed the token and tile limits required for stable inference.
+\begin{equation}
+\mathcal{G}_{M} = \ \left\{ \left( n_{h},\ n_{w} \right) \in \ \mathbb{N}^{2}:\ n_{h}n_{w} \leq \ M \right\}\
+\label{eq4}
+\end{equation}
+\begin{equation}
+G*\  = \arg{\max_{G\  \in \ \mathcal{G}}\left[ \lambda_{1}S_{area(G)} + \ \lambda_{2}S_{balance(G)} - \ \lambda_{3}S_{boundary(G)} \right]}\
+\label{eq5}
+\end{equation}
+\begin{equation}
+a_{r} = \beta_{q}\cos\left( v_{r},\ e_{q} \right) + \ \beta_{o}o_{r} + \ \beta_{b}b_{r} + \ \beta_{h}H_{r}\
+\label{eq6}
+\end{equation}
+\begin{equation}
+u*\  = \arg{\max_{u_{r} \in \ \left\{ 0,1 \right\}}{\Sigma_{r}u_{r}a_{r}}},\ \ \ subject\ to\ \Sigma_{r}u_{r}c_{r} \leq \ B\ and\ \Sigma_{r}u_{r} \leq \ M\
+\label{eq7}
+\end{equation}
+
+
+
+
+As illustrated in Figure~\ref{fig4}, the selected tiles retain their global coordinates before fusion. This prevents two local patches with similar appearance from becoming spatially interchangeable and is essential for recovering small objects without losing scene-level~layout.
+
+\begin{figure}[H]
+
+\includegraphics[width=\textwidth]{figures/figure4.png}
+\caption{Coarse-to-fine adaptive token acquisition: a global representation identifies candidate evidence, after~which task-relevant regions are tiled, encoded, position-aware, and~fused under a fixed visual-token~budget. Letters A--F identify the selected patches in the best $2 \times 3$ partition, while O denotes the original/global context patch.\label{fig4}}
+\end{figure}
+
+\subsection{Cross-Modal Fusion and Efficient~Attention}
+
+Global, local, condition, and~instruction tokens are fused by a Transformer decoder. High-resolution tiling makes the visual portion of the sequence dominant, so GeoGATE uses grouped-query attention (GQA) \citep{ref23}. The~attention organization adopted in GeoGATE is illustrated in Figure~\ref{fig5}. Compared with multi-head attention and multi-query attention, GQA shares key-value projections within each query group while preserving multiple group-specific representations, providing a better trade-off between memory efficiency and representation capacity. Equation~(8) gives the attention computed by query group $g$. With~$H$ query heads and $G$ key-value groups, Equation~(9) shows that the key-value cache is reduced to $G/H$ of the multi-head-attention cache, ignoring shared implementation constants. GQA therefore retains several context subspaces for heterogeneous image regions while avoiding the full cache cost of one key-value pair per query head.
+\begin{equation}
+Attn_{g\left( Q,\ K_{g},\ V_{g} \right)} = \ softmax\left( d^{- 0.5}Q\ K_{g}^{T} \right)V_{g}\
+\label{eq8}
+\end{equation}
+\begin{equation}
+H\ C_{KV}^{GQA} = \ G\ C_{KV}^{MHA}\
+\label{eq9}
+\end{equation}
+
+
+
+\subsection{Geo-Sensor~Conditioning}
+
+Remote sensing appearance is conditional on sensor physics. Structured conditioning is not equivalent to rewriting metadata as prose: each field is embedded separately, continuous values such as ground sampling distance are normalized, and~the resulting vector applies a FiLM-style channel-wise transformation before decoding. In~contrast, prose metadata can influence the model only through later token attention and is sensitive to wording, order, and~omission. Equation~(3) also attaches physical scale and image coordinates directly to visual tokens. This mechanism is a testable inductive bias, not by itself evidence of a performance gain; because the present ablation does not isolate geo-sensor conditioning, no numerical improvement is attributed solely to this~component.
+
+When paired observations of the same geographic content are available, GeoGATE can regularize their projected semantic representations through Equation~(10). The~metadata remains available to the projector, preventing the loss from forcing physically different modalities into identical raw features. Unpaired samples use only the supervised task losses. This cross-sensor pathway is an architectural provision in the current manuscript; a sensor-held-out quantitative evaluation is not reported.
+\begin{equation}
+\mathcal{L}_{sc} = \ 1\  - \cos\left( P\left( z_{a},\ m_{a} \right),\ P\left( z_{b},\ m_{b} \right) \right)\
+\label{eq10}
+\end{equation}
+
+\vspace{-12pt}
+\begin{figure}[H]
+
+
+\begin{adjustwidth}{-\extralength}{0cm}
+\centering %% If there is a figure in wide page, please release command \centering, for Table, ``\textwidth" should be ``\fulllength"
+\includegraphics[width=1.25\textwidth]{figures/figure5.png}
+\end{adjustwidth}
+\caption{Structural comparison of multi-head attention, grouped-query attention, and~multi-query attention. GQA shares key-value projections within groups while retaining multiple query~subspaces. Here, V, K, and Q denote value, key, and query heads, respectively.\label{fig5}}
+\end{figure}
+
+
+\subsection{Geo-Evidence~Retrieval}
+
+Image evidence alone cannot answer every question about sensor specifications, regional land-cover taxonomies, disaster-assessment standards, or~acquisition-dependent interpretation. GeoGATE therefore retrieves compact passages from a remote sensing knowledge base \citep{ref24} while retaining a source identifier for every passage. Figure~\ref{fig6} shows metadata filtering and reranking before fusion. Retrieval is conditioned on image semantics, the~instruction, sensor compatibility, geographic context, and~time. Retrieval and temporal reliability are independent: retrieved passages provide contextual support but are not used to decide whether a bi-temporal visual difference is~genuine.
+
+Equation~(11) defines the metadata-aware retrieval score. Visual and language similarities provide semantic relevance, whereas sensor, geographic, and~temporal terms enforce acquisition compatibility. Equation~(12) converts the top-K scores into evidence weights and derives normalized confidence from score entropy. Diffuse retrieval results therefore receive less weight than concentrated results. Source identifiers, confidence, and~visual grounding make an answer easier to audit, but~they do not constitute a formal guarantee of factual correctness; hallucination and source conflict remain possible and require a dedicated factuality evaluation.
+\begin{equation}
+R(d) = \ \eta_{v}\operatorname{sim}\left( e_{X},\ e_{d} \right) + \ \eta_{q}\operatorname{sim}\left( e_{q},\ e_{d} \right) + \ \eta_{s}M_{s} + \ \eta_{g}M_{g} + \ \eta_{t}M_{t}\
+\label{eq11}
+\end{equation}
+\begin{equation}
+\alpha_{d} = \ softmax\left( \frac{R(d)}{\tau_{r}} \right),\ \ \ e\  = \ \Sigma_{d = 1}^{K}\alpha_{d}E(d),\ \ \ c_{e} = \ 1\  - \frac{H(\alpha)}{\log K}\
+\label{eq12}
+\end{equation}
+\vspace{-12pt}
+\begin{figure}[H]
+
+
+\begin{adjustwidth}{-\extralength}{0cm}
+\centering %% If there is a figure in wide page, please release command \centering, for Table, ``\textwidth" should be ``\fulllength"
+\includegraphics[width=1.25\textwidth]{figures/figure6-clean.png}
+\end{adjustwidth}
+\caption{Metadata-aware geo-evidence retrieval \citep{ref24}. The~evidence snippets in the schematic are illustrative and contain no embedded bracketed reference citations. Visual and textual queries are filtered by sensor, geographic, and~temporal compatibility before the selected evidence is fused with image tokens and the task~instruction.\label{fig6}}
+\end{figure}
+
+
+\section{Remote Sensing Task~Adaptation}
+
+
+\subsection{Visual Grounding and Object~Localization}
+
+For visual grounding, GeoGATE generates the entity description and a normalized box B\_p in the same response. The~visual grounding pipeline adopted in GeoGATE is illustrated in Figure~\ref{fig7}. During~inference, the~model first predicts object categories and corresponding coordinates in a structured format, and~the predicted boxes are subsequently rendered on the original image for visualization. Equation~(13) measures overlap with the ground-truth box B\_g. This formulation makes the evidence behind a fluent answer spatially auditable and separates semantic correctness from geometric correctness. The~box head is trained jointly with the language decoder through classification, coordinate, and~generalized-IoU terms in the unified objective of Equation~(21).
+\begin{equation}
+\operatorname{IoU}(B_{p}, B_{g}) = \frac{\operatorname{Area}(B_{p} \cap B_{g})}{\operatorname{Area}(B_{p} \cup B_{g})}
+\label{eq13}
+\end{equation}
+
+Equation~(14) defines Acc@0.5: a prediction is correct only if its intersection over union is at least 0.5. The~supervision format adopted for visual grounding is shown in Figure~\ref{fig8}. The~structured target retains class text, coordinate order, image identity, and~normalization convention. This is essential for geographic tasks because the same textual answer can be unsupported when the predicted region is displaced to a neighboring object or crosses a tile boundary.
+\begin{equation}
+Acc@0.5\  = \ \left( \frac{1}{N} \right)\Sigma_{i = 1}^{N}1\left[ IoU\left( B_{p}^{i},\ B_{g}^{i} \right) \geq \ 0.5 \right]\
+\label{eq14}
+\end{equation}
+
+\begin{figure}[H]
+
+\includegraphics[width=\textwidth]{figures/figure7-hires.png}
+\caption{Visual grounding workflow from task instruction and remote sensing image to a category-aware bounding-box prediction and explanatory~response.\label{fig7}}
+\end{figure}
+
+\vspace{-10pt}
+\begin{figure}[H]
+
+\includegraphics[width=\textwidth]{figures/figure8.png}
+\caption{Structured instruction-tuning record for visual grounding, showing image tokens, target labels, and~normalized bounding-box coordinates used for supervised~adaptation.\label{fig8}}
+\end{figure}
+
+
+\subsection{Reliability-Aware Multi-Temporal~Reasoning}
+
+Multi-temporal analysis must distinguish genuine structural change from illumination, cloud, phenology, viewing geometry, modality, and~registration differences. Figure~\ref{fig9} shows the proposed temporal pathway. A~shared encoder produces temporal features, an~alignment operator maps them to common spatial support, and~Equation~(15) gates the aligned difference using a reliability estimate computed from visual features and acquisition metadata. The~gate does not consume retrieved passages and therefore does not depend on external evidence to suppress pseudo-change.
+\begin{equation}
+\Delta z\  = \ A\left( z_{t2} \right) - \ A\left( z_{t1} \right),\ \ \ g\  = \ \sigma\left( f\left( z_{t1},\ z_{t2},\ m_{t1},\ m_{t2} \right) \right),\ \ \ z_{\Delta} = \ g\  \odot \ \Delta z\
+\label{eq15}
+\end{equation}
+
+The gated representation is designed to decode a structured event containing the affected object or region, states at $t_1$ and $t_2$, change type, evidence location, confidence, and~a possible nuisance factor. This schema exposes the basis of a change claim and can discourage direct conversion of weak seasonal or registration differences into categorical events. Because~no dedicated change-detection or change-captioning results are reported, this section specifies the intended mechanism rather than demonstrating temporal performance. Establishing this temporal reasoning module as a validated empirical result would require, at~minimum, competitive change-captioning BLEU scores on a dedicated bi-temporal benchmark such as~LEVIR-CC. Related multimodal change-detection and change-captioning studies include ChangeCLIP, dual-branch change captioning, MV-S2CD, and~ChangeVLM \citep{ref25,ref26,ref27,ref28}.
+\vspace{-6pt}
+\begin{figure}[H]
+
+
+\begin{adjustwidth}{-\extralength}{0cm}
+\centering %% If there is a figure in wide page, please release command \centering, for Table, ``\textwidth" should be ``\fulllength"
+\includegraphics[width=1.3\textwidth]{figures/figure9.png}
+\end{adjustwidth}
+\caption{Reliability-aware multi-temporal reasoning. The~model aligns temporal representations, extracts structural differences, estimates acquisition reliability, and~gates the final change evidence before~generation.\label{fig9}}
+\end{figure}
+
+
+\subsection{Multi-Image and Sequential~Inference}
+
+GeoGATE handles one image, multiple views, or~a temporal image set with the same sequence interface. Each image is encoded independently, assigned an image-position and acquisition token, and~then fused under a shared instruction. The~arrangement preserves image identity so that the decoder can compare views without conflating their spatial or temporal roles. Figure~\ref{fig10} makes the difference between single-image and multi-image serialization~explicit.
+
+
+
+
+The serialization in Figure~\ref{fig10} keeps each image block intact and places the task after the image sequence. The~decoder can therefore compare images while retaining which evidence belongs to each~observation.
+
+Sequential frames are an extension of the multi-image formulation. Frames are sampled, assigned temporal indices, encoded by the shared visual backbone, and~aggregated before decoding. As~Figure~\ref{fig11} shows, the~same interface can support sequence-level prompts without changing the core architecture. Because~the present experiments do not include a dedicated video benchmark, this capability is reported as architectural support rather than a validated performance~claim.
+
+
+\begin{figure}[H]
+
+\includegraphics[width=\textwidth]{figures/figure10.png}
+\caption{Single-image and multi-image inference formats, including image delimiters, patch tokens, task instructions, and~the ordering used to preserve correspondence among multiple remote sensing~observations.\label{fig10}}
+\end{figure}
+\vspace{-12pt}
+\begin{figure}[H]
+
+\includegraphics[width=\textwidth]{figures/figure11.png}
+\caption{Conceptual extension of GeoGATE from ordered remote sensing image sets to sampled video or sequential-frame~reasoning.\label{fig11}}
+\end{figure}
+
+
+\section{Efficient Adaptation and~Reproducibility}
+
+
+\subsection{Training Data~Construction}
+
+Training examples are converted into a unified instruction record containing one or more images, task text, geo-sensor metadata, optional retrieved evidence, and~a task-specific target. Caption and VQA targets are textual; grounding targets contain normalized coordinates; multi-temporal records preserve acquisition order and quality; and retrieval records retain source identifiers. Table~\ref{tab1} distinguishes the primary quantitative benchmark from auxiliary and extension resources. VRSBench is the only dataset used for the quantitative results reported in Sections~\ref{sec5.2}--\ref{sec5.4}. FAIR1M \citep{ref1} and NWPU VHR-10 support task adaptation or qualitative analysis, whereas the temporal, SAR, and~disaster datasets support data construction or intended extensions; no cross-sensor or bi-temporal quantitative score is claimed. Dataset splits are frozen before conversion, and~test-derived annotations are excluded from the retrieval~index.
+
+\begin{table}[H]
+\caption{Dataset roles, task coverage, and~evaluation outputs used in the GeoGATE~study.\label{tab1}}
+\small
+\begin{tabularx}{\textwidth}{m{2cm}<{\raggedright}LLL}
+\toprule
+\textbf{Dataset} & \textbf{Role in This Study} & \textbf{Task} & \textbf{Reported Evidence} \\
+\midrule
+Git-10M & Training data construction & Remote sensing semantic learning with images and texts & Training supervision only; no separate test~score \\
+\midrule
+RSICD & Auxiliary caption training and assessment & Image description & BLEU, METEOR, and~ROUGE-L where~applicable \\
+\midrule
+VRSBench & Primary quantitative training and test benchmark & Image description, visual positioning, VQA & BLEU, Acc@0.5, VQA, METEOR, and~ROUGE-L \\
+\midrule
+FAIR1M \citep{ref1} & Task adaptation resource; no separate quantitative table & Visual localization/target grounding & Bounding-box supervision and IoU~labels \\
+\midrule
+NWPU VHR-10 & Qualitative case study & Typical ground object target recognition & Categories and locations \\
+\midrule
+CC-Foundation & Temporal auxiliary resource; no direct quantitative evaluation & Description of multiple phases and changes & Change descriptions used as auxiliary~supervision \\
+\midrule
+LEVIR-CC & Temporal auxiliary resource; no direct quantitative evaluation & Understanding architectural changes & Change captions used as auxiliary~supervision \\
+\midrule
+OpenEarthMap-SAR & Cross-sensor extension resource; no direct quantitative evaluation & SAR landmark classification & SAR labels used for extension-oriented data~construction \\
+\midrule
+BRIGHT \citep{ref2}/xBD & Retrieval and qualitative disaster support; no direct quantitative evaluation & Disaster assessment Q\&A & Damage descriptions and question-answer~records \\
+
+\bottomrule
+\end{tabularx}
+\end{table}
+
+
+\subsection{Backbone Definition and LoRA-Based Parameter-Efficient~Fine-Tuning}
+
+GeoGATE is instantiated from the OpenBMB MiniCPM-V model family, retaining its visual encoder, resampler, and~causal language-decoder interface. Reproducibility requires the exact checkpoint tag and revision hash to be recorded in the released configuration. In~the experiments, MiniCPM-V denotes the external comparison model; GeoGATE (Base) denotes the same initialization, data, and~optimization schedule with geo-sensor modulation, the~proposed region scorer, metadata-filtered retrieval, and~the temporal reliability gate disabled, while native fixed slicing is retained; and GeoGATE (Ours) denotes the full pipeline. LoRA \citep{ref29} is applied to $q_{\mathrm{proj}}$, $k_{\mathrm{proj}}$, $v_{\mathrm{proj}}$, and~$o_{\mathrm{proj}}$ with rank $r = 64$, $\alpha = 16$, and~dropout 0.05. The~training framework reports approximately 154 million trainable parameters; the remaining backbone parameters are frozen. We omit a derived trainable-parameter percentage because it depends on the exact checkpoint revision. The~LoRA parameterization is illustrated in Figure~\ref{fig12}.
+\begin{equation}
+\Delta W\  = \ \left( \frac{\alpha}{r} \right)B\ A,\ \ \ W' = \ W\  + \ \Delta W,\ \ \ A\  \in \ \mathbb{R}^{r\  \times \ d_{in}},\ \ \ B\  \in \ \mathbb{R}^{d_{out} \times \ r}\
+\label{eq16}
+\end{equation}
+\begin{equation}
+h\  = \ W'x\  = \ Wx\  + \ \left( \frac{\alpha}{r} \right)B\ A\ x\
+\label{eq17}
+\end{equation}
+
+\begin{figure}[H]
+
+\includegraphics[width=0.55\textwidth]{figures/figure12.png}
+\caption{LoRA parameterization of a frozen projection matrix using trainable low-rank factors $A$ and $B$ and scaling $\alpha/r$.\label{fig12}}
+\end{figure}
+
+
+\subsection{NF4~Quantization}
+
+After adaptation, the~frozen backbone is evaluated with NF4 quantization \citep{ref30}. \linebreak Equation~(18) gives the 4-bit normalized Gaussian-quantile codebook. Equation~(19) reconstructs the quantized weight and its scale. The~storage calculation includes scale overhead: standard NF4 is approximated as 4.50 bit/parameter for 4-bit codes plus FP32 block scales, while double quantization reduces this by about 0.37 bit/parameter to approximately 4.13 bit/parameter \citep{ref30}. These are estimated weight-storage widths, not measurements of total GPU memory. Equation~(20) shows the QLoRA forward path with dequantized frozen weights and BF16 LoRA factors.
+\begin{equation}
+q_{i} = \ Normalize\left\{ \Phi^{- 1}\left[ \frac{i\  + \ 0.5}{16} \right] \right\},\ \ \ i\  = \ 0,\ \ldots,\ 15\
+\label{eq18}
+\end{equation}
+\begin{equation}
+\hat{s}_{b} = \ s_{2\left( q_{b}^{s} - \ z_{s} \right)},\ \ \ {\widehat{W}}_{b} = \ \hat{s}_{b\left( q_{b}^{w} - \ z_{w} \right)}\
+\label{eq19}
+\end{equation}
+\begin{equation}
+Y_{BF16} = \ X_{BF16}{\widehat{W}}_{NF4} + \ X_{BF16}\left( \frac{\alpha}{r} \right)B_{BF16}A_{BF16}\
+\label{eq20}
+\end{equation}
+
+\subsection{Unified Multi-Task Objective and~Reproducibility}
+
+All task adapters are optimized through the unified objective in Equation~(21). Captioning and VQA use token-level cross-entropy; grounding adds class, L1 box, and~generalized-IoU losses; temporal examples use an auxiliary change-event loss; retrieval examples use evidence-ranking supervision; and paired sensors activate Equation~(10). Loss weights are selected on the validation set and fixed before testing. Table~\ref{tab2} is retained solely as an inventory of documented hardware environments; it is not a cross-device benchmark and does not establish which device produced each result. Table~\ref{tab3} summarizes optimization. GeoGATE uses a 4096-token context, at~most nine slices, 10,000 steps, per-device batch size 2, eight-step gradient accumulation, learning rate $1 \times 10^{-6}$, weight decay 0.1, warmup ratio 0.01, cosine scheduling, gradient checkpointing, and~ZeRO-2. The~vision encoder is fine-tuned; base language model weights remain frozen while LoRA adapters are~trainable.
+\vspace{-10pt}
+
+\begin{adjustwidth}{-\extralength}{0cm}
+\begin{equation}
+\mathcal{L} = \lambda_{cap}\mathcal{L}_{cap} + \lambda_{vqa}\mathcal{L}_{vqa} + \lambda_{grd}\left(\mathcal{L}_{cls} + \lambda_{box}\mathcal{L}_{1} + \lambda_{iou}\mathcal{L}_{GIoU}\right) + \lambda_{tmp}\mathcal{L}_{tmp} + \lambda_{ret}\mathcal{L}_{ret} + \lambda_{sc}\mathcal{L}_{sc}
+\label{eq21}
+\end{equation}
+\end{adjustwidth}
+
+\begin{table}[H]
+\caption{Documented hardware environments available to the study; this inventory is not a cross-device~benchmark.\label{tab2}}
+\small
+\begin{tabularx}{\textwidth}{m{4.8cm}<{\raggedright}m{4.2cm}<{\raggedright}L}
+\toprule
+\textbf{Platform} & \textbf{Accelerator} & \textbf{Available Memory} \\
+\midrule
+Ubuntu 24.04.2 LTS (x86\_64) & NVIDIA GeForce RTX 5090 D & 32~GiB \\
+Ubuntu 24.04.2 LTS (x86\_64) & NVIDIA GeForce RTX 4070 Ti & 12~GiB \\
+Windows 11 (build 22631.5472) & NVIDIA GeForce RTX 3060 & 8~GiB \\
+macOS, MacBook Pro 2021 & Apple M1 Max (MPS) & 16 GiB unified~memory \\
+\bottomrule
+\end{tabularx}
+\end{table}
+\vspace{-10pt}
+
+\begin{table}[H]
+\caption{Reproducible GeoGATE training and optimization~configuration.\label{tab3}}
+\small
+
+
+\begin{adjustwidth}{-\extralength}{0cm}
+%\centering %% If there is a figure in wide page, please release command \centering, for Table, ``\textwidth" should be ``\fulllength"
+
+
+\begin{tabularx}{\fulllength}{m{5.8cm}<{\raggedright}Lm{8.2cm}<{\raggedright}}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Description} \\
+\midrule
+--model\_max\_length & 4096 & Maximum multimodal sequence~length \\
+\midrule
+--max\_slice\_nums & 9 & Maximum number of local image~slices \\
+\midrule
+--max\_steps & 10,000 & Maximum optimization~steps \\
+\midrule
+--per\_device\_train\_batch\_size & 2 & Per-device training batch~size \\
+\midrule
+--gradient\_accumulation\_steps & 8 & Number of gradient-accumulation~steps \\
+\midrule
+--learning\_rate & $1 \times 10^{-6}$ & Learning~rate \\
+\midrule
+--weight\_decay & 0.1 & Weight decay~coefficient \\
+\midrule
+--warmup\_ratio & 0.01 & Learning rate warm-up~ratio \\
+\midrule
+--lr\_scheduler\_type & ``cosine'' & Cosine learning-rate~schedule \\
+\midrule
+LoRA & enabled & Language model adaptation enabled through~LoRA \\
+\midrule
+tune\_vision\_encoder & yes & Vision encoder fine-tuned \\
+\midrule
+tune\_llm & no & Base language model weights frozen; LoRA adapters~trainable \\
+\midrule
+--gradient\_checkpointing & true & Gradient checkpointing~enabled \\
+\midrule
+--deepspeed & ds\_config\_zero2.json & DeepSpeed ZeRO Stage 2~configuration \\
+\bottomrule
+\end{tabularx}
+\end{adjustwidth}
+\end{table}
+
+
+\section{Experimental~Design}
+
+
+\subsection{Evaluation Protocol and~Metrics}
+
+Evaluation uses the released VRSBench test split and official metric definitions \citep{ref11}. The~GeoChat without VRSBench fine-tuning, GPT-4V, MiniGPT-v2, LLaVA-1.5, GeoChat, and~Mini-Gemini rows in Table~\ref{tab4} are transcribed from the official benchmark; they were not rerun in our environment. MiniCPM-V and all GeoGATE variants were evaluated on the same test split, and~decoding was held fixed across the GeoGATE Base, Full, and~ablation runs. Consequently, Full-versus-Base and component ablations are controlled comparisons, whereas comparisons with external rows are same-benchmark contextual comparisons rather than identical-runtime experiments. We do not combine newer grounding-only reports whose published VRSBench baseline values indicate different training or inference protocols. Equations~(22)--(25) define answer accuracy, BLEU, METEOR, and~ROUGE-L; grounding uses Equations~(13) and (14). All table values are reported on a 0--100 scale, with~Acc@0.5 and VQA interpreted as percentages.
+\begin{equation}
+Acc\  = \ \left( \frac{1}{N} \right)\Sigma_{i = 1}^{N}1\left[ \hat{y}_{i} = \ y_{i} \right]\
+\label{eq22}
+\end{equation}
+\begin{equation}
+BLEU_{N} = \ BP\exp\left( \Sigma_{n = 1}^{N}w_{n}\log p_{n} \right)\
+\label{eq23}
+\end{equation}
+\begin{equation}
+METEOR\  = \frac{10\ P\ R}{R\  + \ 9\ P}(1\  - \ Pen)\
+\label{eq24}
+\end{equation}
+\begin{equation}
+ROUGE - L\  = \frac{\left( 1\  + \ \beta^{2} \right)R_{L}P_{L}}{R_{L} + \ \beta^{2}P_{L}},\ \ \ LCS\  = \ LCS(Y,\ Y*)\
+\label{eq25}
+\end{equation}
+
+
+
+\begin{table}[H]
+\caption{Quantitative results on VRSBench. External baseline values are reproduced from the official VRSBench evaluation; GeoGATE variants use a shared local~protocol. An~asterisk (*) denotes a statistically significant improvement over GeoGATE (Base) ($p < 0.05$, paired bootstrap).\label{tab4}}
+\small
+\begin{adjustwidth}{-\extralength}{0cm}
+%\setlength{\tabcolsep}{3.1pt}
+%\begin{tabularx}{\dimexpr\fulllength-5pt\relax}{@{}>{\raggedright\arraybackslash}p{0.22\textwidth}CCCCCCC@{}}
+\begin{tabularx}{\fulllength}{m{2.8cm}<{\raggedright}CCCCCCC}
+\toprule
+\textbf{Model} & \textbf{BLEU-1} & \textbf{BLEU-2} & \textbf{BLEU-4} & \textbf{\shortstack{Acc@0.5\\(IoU All)}} & \textbf{\shortstack{VQA\\(All)}} & \textbf{METEOR} & \textbf{\shortstack{ROUGE\\L}} \\
+\midrule
+GeoChat (no FT) & 13.9 & 6.6 & 1.4 & 12.9 & 40.8 & 7.8 & 13.2 \\
+GPT-4V & 37.2 & 22.5 & 8.6 & 5.1 & 65.6 & 20.9 & 30.1 \\
+MiniGPT-v2 & 36.8 & 22.4 & 8.7 & 35.8 & 38.2 & 17.1 & 30.8 \\
+LLaVA-1.5 & 48.1 & 31.5 & 14.7 & 41.6 & 76.4 & 21.9 & 36.9 \\
+GeoChat & 46.7 & 30.2 & 13.8 & 49.8 & 76.0 & 21.1 & 35.2 \\
+Mini-Gemini & 47.6 & 31.1 & 14.3 & 30.1 & 77.8 & 21.5 & 36.8 \\
+MiniCPM-V & 16.4 & 7.3 & 1.5 & 8.3 & 23.1 & 23.0 & 17.7 \\
+GeoGATE (Base) & 49.5 ± 0.3 & 33.2 ± 0.4 & 15.6 ± 0.2 & 48.5 ± 0.5 & 78.5 ± 0.3 & 22.8 ± 0.2 & 38.4 ± 0.3 \\
+GeoGATE (Ours) & 53.4 ± 0.4 *
+ & 36.8 ± 0.3 * & 18.2 ± 0.2 * & 56.4 ± 0.4 * & 82.3 ± 0.3 * & 25.1 ± 0.2 * & 42.6 ± 0.3 * \\
+\bottomrule
+\end{tabularx}
+\end{adjustwidth}
+\end{table}
+
+\subsection{Main Results and Qualitative~Analysis}\label{sec5.2}
+
+
+
+Table~\ref{tab4} should be interpreted by comparison type. The~improvement of GeoGATE (Ours) over GeoGATE (Base) is controlled because initialization, data, optimization, and~decoding are shared. External rows provide official VRSBench context but do not share an identical runtime. Across the controlled pair, gains in BLEU, METEOR, ROUGE-L, VQA, and~Acc@0.5 indicate improvements in both language output and spatial grounding rather than in a single metric family. The~values for GeoGATE (Base) and GeoGATE (Ours) report the mean ± standard deviation over three random seeds. In the table, * denotes a statistically significant improvement (\emph{p} \textless~0.05) in the Full configuration over the Base configuration, measured via paired~bootstrap.
+
+The former X1--X4 table has been replaced because X1--X4 are not defined by the official VRSBench protocol \citep{ref11}. Table~\ref{tab5} now lists only named, reproducible indicators with their task, definition, and~unit. This avoids presenting undocumented composite scores and makes clear that BLEU, METEOR, ROUGE-L, Acc@0.5, and~VQA measure different~outcomes.
+
+\begin{table}[H]
+\caption{Definitions and reporting units of the VRSBench indicators used in this~study.\label{tab5}}
+\small
+
+\begin{adjustwidth}{-\extralength}{0cm}
+%\centering %% If there is a figure in wide page, please release command \centering, for Table, ``\textwidth" should be ``\fulllength"
+
+
+\begin{tabularx}{\fulllength}{m{2cm}<{\raggedright}m{2cm}<{\raggedright}m{7cm}<{\raggedright}m{3cm}<{\raggedright}L}
+\toprule
+\textbf{Task} & \textbf{Indicator} & \textbf{Definition} & \textbf{Reporting Unit} & \textbf{Direction} \\
+\midrule
+Captioning & BLEU-1/2/4 & Corpus n-gram precision with brevity penalty & Score on a 0--100 scale & Higher is~better \\
+\midrule
+Captioning & METEOR & Unigram alignment combining precision, recall, and~fragmentation penalty & Score on a 0--100 scale & Higher is~better \\
+\midrule
+Captioning & ROUGE-L & Longest-common-subsequence overlap with the reference caption & Score on a 0--100 scale & Higher is~better \\
+\midrule
+Grounding & Acc@0.5 (All) & Percentage of all referring expressions whose predicted box has IoU $\geqslant 0.5$
+ & Percent (\%) & Higher is~better \\
+\midrule
+VQA & VQA (All) & Official open-set answer correctness aggregated across VRSBench question categories & Percent (\%) & Higher is~better \\
+\bottomrule
+\end{tabularx}
+\end{adjustwidth}
+\end{table}
+
+Figures~\ref{fig13} and \ref{fig14} complement the quantitative results with object-level behavior on real NWPU VHR-10 images \citep{ref31}. The~vehicle scene tests small elongated targets under shadows, while the storage tank scene tests repeated circular structures at several scales. Green boxes are dataset annotations and red boxes are model~outputs.
+
+\begin{figure}[H]
+
+\includegraphics[width=\textwidth]{figures/figure13.png}
+\caption{Qualitative grounding comparison on a real NWPU VHR-10 urban vehicle scene \citep{ref31}. Green boxes denote ground truth and red boxes denote model~predictions.\label{fig13}}
+\end{figure}
+
+
+In Figure~\ref{fig13}, GeoGATE (Ours) recovers nearly all annotated vehicles and keeps the red boxes close to the green reference extent. The~base and external models omit more vehicles or produce coarser boxes, especially near shadows and the image boundary. This scene provides qualitative support for the controlled Acc@0.5 improvement reported in Table~\ref{tab4}.
+
+Figure~\ref{fig14} further illustrates grounding behavior on a storage tank scene. GeoGATE (Ours) produces more complete and spatially aligned detections for densely distributed tanks, while the comparison models show more missed detections or coarser localization. These examples are qualitative support for the controlled Acc@0.5 comparison in Table~\ref{tab4}; they are not a substitute for category-wise~statistics.
+
+\begin{figure}[H]
+
+\includegraphics[width=\textwidth]{figures/figure14.png}
+\caption{Qualitative grounding comparison on a real NWPU VHR-10 industrial storage tank\linebreak  scene \citep{ref31}. Green boxes denote ground truth and red boxes denote model~predictions.\label{fig14}}
+\end{figure}
+
+
+\subsection{Ablation Study and Error~Analysis}\label{sec5.3}
+
+
+
+Table~\ref{tab6} excludes FP16, which is evaluated separately in Table~\ref{tab7} as a deployment setting. Replacing typed FiLM conditioning with a `Prose-metadata prompt' decreases Acc@0.5 from 56.4 to 50.1 and BLEU-4 from 18.2 to 16.0. This quantitatively substantiates that structured geo-sensor conditioning is significantly more effective than treating metadata merely as optional text prompts. Furthermore, `No LLM LoRA' ablates language model adaptation while keeping the vision encoder trainable, and `No temporal auxiliary data' reflects minor transfer effects on VRSBench rather than direct change-detection accuracy. Under~this controlled protocol, adaptive slicing most strongly affects localization, retrieval impacts language and VQA, and~disabling language model adaptation causes the largest overall degradation. The~values for GeoGATE (Base) and GeoGATE (Ours, Full) report the mean ± standard deviation over three random seeds, with~* denoting a statistically significant gap (\emph{p} \textless~ 0.05) measured via paired~bootstrap.
+
+\begin{table}[H]
+\caption{Component ablation for GeoGATE under the shared local evaluation~protocol. An~asterisk (*) denotes a statistically significant difference from GeoGATE (Base) ($p < 0.05$, paired bootstrap).\label{tab6}}
+\small
+\begin{adjustwidth}{-\extralength}{0cm}
+%\setlength{\tabcolsep}{3pt}
+%\begin{tabularx}{\dimexpr\textwidth-5pt\relax}{@{}>{\raggedright\arraybackslash}p{0.22\textwidth}CCCCCCC@{}}
+\begin{tabularx}{\fulllength}{m{3.8cm}<{\raggedright}CCCCCCC}
+\toprule
+\textbf{\shortstack{Experimental\\Configuration}} & \textbf{BLEU-1} & \textbf{BLEU-2} & \textbf{BLEU-4} & \textbf{\shortstack{Acc@0.5\\(IoU All)}} & \textbf{\shortstack{VQA\\(All)}} & \textbf{METEOR} & \textbf{\shortstack{ROUGE\\L}} \\
+\midrule
+GeoGATE (Base) & 49.5 ± 0.3 & 33.2 ± 0.4 & 15.6 ± 0.2 & 48.5 ± 0.5 & 78.5 ± 0.3 & 22.8 ± 0.2 & 38.4 ± 0.3 \\
+GeoGATE (Ours, Full) & 53.4 ± 0.4 *
+ & 36.8 ± 0.3 * & 18.2 ± 0.2 * & 56.4 ± 0.4 * & 82.3 ± 0.3 * & 25.1 ± 0.2 * & 42.6 ± 0.3 * \\
+Prose-metadata prompt & 50.4 & 33.9 & 16.0 & 50.1 & 79.2 & 23.4 & 39.7 \\
+w/o RAG & 52.1 & 35.5 & 17.1 & 55.2 & 79.8 & 24.0 & 41.2 \\
+No LLM LoRA & 49.8 & 33.6 & 15.8 & 49.5 & 78.9 & 23.1 & 38.9 \\
+Fixed Slice & 50.5 & 34.2 & 16.2 & 51.3 & 80.1 & 23.6 & 40.0 \\
+MQA & 52.8 & 36.1 & 17.6 & 55.8 & 81.5 & 24.6 & 41.9 \\
+No temporal auxiliary data & 53.1 & 36.5 & 18.0 & 56.1 & 81.9 & 24.9 & 42.3 \\
+\bottomrule
+\end{tabularx}
+\end{adjustwidth}
+\end{table}
+
+\vspace{-12pt}
+\begin{table}[H]
+\caption{Estimated quantized-weight storage, measured GPU memory, and~VRSBench accuracy under FP16, NF4, and~NF4 with double~quantization.\label{tab7}}
+\small
+\begin{adjustwidth}{-\extralength}{0cm}
+%\setlength{\tabcolsep}{3pt}
+%\begin{tabularx}{\dimexpr\textwidth-5pt\relax}{@{}>{\raggedright\arraybackslash}p{0.22\textwidth}CCCCCCC@{}}
+\begin{tabularx}{\fulllength}{m{3.4cm}<{\raggedright}m{2.8cm}<{\centering}Cm{2.6cm}<{\centering}CCCC}
+\toprule
+\textbf{\shortstack{Precision/\\Quantization}} & \textbf{\shortstack{Est. Weight\\Storage\\(Bit/Parameter)}} & \textbf{\shortstack{Video\\Memory\\(GiB)}} & \textbf{\shortstack{VRAM\\Reduction (\%)}} & \textbf{\shortstack{Peak\\Memory\\(GiB)}} & \textbf{BLEU-4} & \textbf{Acc@0.5} & \textbf{\shortstack{VQA\\(All)}} \\
+\midrule
+FP16 & 16.00 & 24.5 & 0.0\% & 28.2 & 18.3 & 56.6 & 82.5 \\
+NF4 & 4.50 & 7.2 & 70.6\% & 10.5 & 18.2 & 56.4 & 82.3 \\
+\scalebox{.95}[0.95]{NF4 + double quantization} & 4.13 & 6.5 & 73.5\% & 9.8 & 18.1 & 56.1 & 82.1 \\
+\bottomrule
+\end{tabularx}
+\end{adjustwidth}
+\end{table}
+
+
+The remaining failures fall into four categories. Small-object omissions occur when the selected regions still provide insufficient pixel evidence. Boundary-shifted boxes arise in dense scenes, shadows, and~partially occluded targets. Retrieval conflicts occur when region-specific terminology disagrees with visually similar land-cover categories. Temporal pseudo-change occurs when registration, season, illumination, or~modality differences receive an overly high reliability score. These errors motivate stronger proposal calibration, evidence-source auditing, and~explicit uncertainty~evaluation.
+
+\subsection{Resource~Efficiency}\label{sec5.4}
+
+
+
+The VRAM-reduction column in Table~\ref{tab7} is computed from measured video memory as 100 $\times$ (24.5 $-$ $M$)/24.5, where $M$ is the memory of the quantized run. It is not the ideal 16-to-4-bit weight-compression ratio. The~estimated weight-storage column accounts for quantization-scale overhead: NF4 is approximately 4.50 bit/parameter, and double quantization is approximately 4.13 bit/parameter \citep{ref30}. Total GPU memory also contains activations, key-value caches, LoRA weights, visual modules, allocator overhead, and~other unquantized states. NF4 therefore reduces measured video memory from 24.5 to 7.2 GiB (70.6\%) and~double quantization to 6.5 GiB (73.5\%), with~only small changes in the reported VRSBench~metrics.
+
+
+
+\section{Discussion}
+
+The controlled Full-versus-Base and component comparisons support a narrower interpretation than the original wording. Adaptive token acquisition is most strongly associated with localization, retrieval with language and VQA, and~LoRA-based language adaptation with all reported tasks. Figures~\ref{fig13} and \ref{fig14} provide object-level illustrations of the grounding behavior. Quantization is evaluated separately as a deployment choice. The~present results do not isolate geo-sensor conditioning and do not test temporal or cross-sensor generalization; no causal claim is made for those~components.
+
+The study has three material evidentiary limits. First, geo-sensor conditioning is not isolated in Table~\ref{tab6}, so the current results cannot quantify the benefit of typed metadata over a prose prompt. Second, no sensor-held-out, modality-transfer, or~ground-sampling-distance shift experiment is reported. Third, no dedicated change-detection or change-captioning benchmark is reported, so the temporal gate remains an architectural hypothesis. Retrieval also lacks a factuality or citation-correctness benchmark, and~the selected qualitative scenes cannot replace category-wise error statistics. A~complete validation should add sensor-, region-, and~resolution-held-out splits; paired optical-SAR evaluation; LEVIR-CC or an equivalent bi-temporal benchmark; retrieval provenance and conflict metrics; and latency, throughput, energy, and~calibration~measurements.
+
+\section{Conclusions}
+
+This paper presented GeoGATE, a~geo-sensor-guided framework for high-resolution remote sensing image understanding. Typed acquisition fields modulate visual features, physical scale informs budgeted region selection, grouped-query attention reduces the cache cost of long visual sequences, metadata compatibility filters source-linked retrieval, and~a separate reliability gate is defined for aligned temporal differences. On~VRSBench, the~complete model improves captioning, VQA, and~grounding over the controlled GeoGATE (Base) configuration, while NF4 substantially reduces measured memory. These results validate the single-image components and deployment analysis. Cross-sensor generalization, retrieval factuality, and~temporal change reasoning require dedicated evaluation before they can be claimed as demonstrated capabilities.
+\vspace{+6pt}
+
+\authorcontributions{Conceptualization, J.Z. and F.Z.; methodology, J.Z.; software, J.Z.; validation, J.Z.; formal analysis, J.Z. and F.Z.; investigation, J.Z.; resources, F.Z.; data curation, J.Z.; writing—original draft preparation, J.Z.; writing—review and editing, J.Z. and F.Z.; visualization, J.Z.; supervision, F.Z.; project administration, F.Z. All authors have read and agreed to the published version of the manuscript.}
+\funding{This research received start-up funding from the high-level talent recruitment program of Jiangsu University of Science and Technology (Grant No. 1022932208 and Grant No. 1132932301).}
+\dataavailability{The datasets, source code, and~pretrained model weights will be publicly available at \url{https://github.com/GeoGATE-RS} (accessed on 28 August 2026) upon publication.}
+\conflictsofinterest{The authors declare no conflicts of~interest.}
+
+\begin{adjustwidth}{-\extralength}{0cm}
+% %% If there is a figure in wide page, please release command , for Table, ``\textwidth" should be ``\fulllength"
+
+\reftitle{References}
+\begin{thebibliography}{999}
+\bibitem{ref1}
+Sun X, Wang P, Yan Z, et al. FAIR1M: A benchmark dataset for fine-grained object recognition in high-resolution remote sensing imagery[J]. ISPRS Journal of Photogrammetry and Remote Sensing, 2022, 184: 116-130.
+\bibitem{ref2}
+Chen H, Song J, Dietrich O, et al. BRIGHT: A globally distributed multimodal building damage assessment dataset with very-high-resolution for all-weather disaster response[J]. Earth System Science Data, 2025, 17: 6217-6253.
+\bibitem{ref3}
+Radford A, Kim J W, Hallacy C, et al. Learning transferable visual models from natural language supervision[C]//International Conference on Machine Learning. PMLR, 2021: 8748-8763.
+\bibitem{ref4}
+Li J, Li D, Xiong C, et al. BLIP: Bootstrapping language-image pre-training for unified vision-language understanding and generation[C]//International Conference on Machine Learning. PMLR, 2022: 12888-12900.
+\bibitem{ref5}
+Li J, Li D, Savarese S, et al. BLIP-2: Bootstrapping language-image pre-training with frozen image encoders and large language models[C]//International Conference on Machine Learning. PMLR, 2023: 19730-19742.
+\bibitem{ref6}
+Liu H, Li C, Wu Q, et al. Visual instruction tuning[C]//Advances in Neural Information Processing Systems. 2023, 36: 34892-34916.
+\bibitem{ref7}
+Kirillov A, Mintun E, Ravi N, et al. Segment anything[C]//Proceedings of the IEEE/CVF International Conference on Computer Vision. 2023: 4015-4026.
+\bibitem{ref8}
+Kuckreja K, Danish M S, Naseer M, et al. GeoChat: Grounded large vision-language model for remote sensing[C]//Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 2024: 27831-27840.
+\bibitem{ref9}
+Zhang W, Cai M, Zhang T, et al. EarthGPT: A universal multimodal large language model for multisensor image comprehension in remote sensing domain[J]. IEEE Transactions on Geoscience and Remote Sensing, 2024, 62: 5917820.
+\bibitem{ref10}
+Bazi Y, Bashmal L, Al Rahhal M M, et al. RS-LLAVA: A large vision-language model for joint captioning and question answering in remote sensing imagery[J]. Remote Sensing, 2024, 16: 1477.
+\bibitem{ref11}
+Li X, Ding J, Elhoseiny M. VRSBench: A versatile vision-language benchmark dataset for remote sensing image understanding[C]//Advances in Neural Information Processing Systems. 2024, 37: 3229-3242.
+\bibitem{ref12}
+Ge J, Zhang X, Zheng Y, et al. RSTeller: Scaling up visual language modeling in remote sensing with rich linguistic semantics from openly available data and large language models[J]. ISPRS Journal of Photogrammetry and Remote Sensing, 2025, 226: 146-163.
+\bibitem{ref13}
+Zhan Y, Xiong Z, Yuan Y. SkyEyeGPT: Unifying remote sensing vision-language tasks via instruction tuning with large language model[J]. ISPRS Journal of Photogrammetry and Remote Sensing, 2025, 221: 64-77.
+\bibitem{ref14}
+Muhtar D, Li Z, Gu F, et al. LHRS-Bot: Empowering remote sensing with VGI-enhanced large multimodal language model[C]//European Conference on Computer Vision. Springer Nature, 2024: 440-457.
+\bibitem{ref15}
+Wang F, Chen M, Li Y, et al. GeoLLaVA-8K: Scaling remote-sensing multimodal large language models to 8K resolution[C]//Advances in Neural Information Processing Systems. 2026, 38: 159185-159218.
+\bibitem{ref16}
+Ou R, Hu Y, Zhang F, et al. GeoPix: Multi-modal large language model for pixel-level image understanding in remote sensing[J]. IEEE Geoscience and Remote Sensing Magazine, 2025, 13: 324-337.
+\bibitem{ref17}
+Lin H, Hong D, Ge S, et al. RS-MoE: A vision-language model with mixture of experts for remote sensing image captioning and visual question answering[J]. IEEE Transactions on Geoscience and Remote Sensing, 2025, 63: 5614918.
+\bibitem{ref18}
+Fu Z, Yan H, Ding K. CLIP-MoA: Visual-language models with mixture of adapters for multi-task remote sensing image classification[J]. IEEE Transactions on Geoscience and Remote Sensing, 2025, 63: 4703817.
+\bibitem{ref19}
+Zhou Y, Lan M, Li X, et al. GeoGround: A unified large vision-language model for remote sensing visual grounding[EB/OL]. arXiv, 2024: 2411.11904.
+\bibitem{ref20}
+Danish M S, Munir M A, Shah S R A, et al. GeoBench-VLM: Benchmarking vision-language models for geospatial tasks[C]//Proceedings of the IEEE/CVF International Conference on Computer Vision. 2025: 7132-7142.
+\bibitem{ref21}
+Hasan M, Hossain M A, Roy S, et al. GeoMeld: Toward semantically grounded foundation models for remote sensing[C]//Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 2026: 7792-7801.
+\bibitem{ref22}
+Yang Y, Zhang X, Fang Q, et al. FUSAR-KLIP: Towards multimodal foundation models for remote sensing[EB/OL]. arXiv, 2025: 2509.23927.
+\bibitem{ref23}
+Ainslie J, Lee-Thorp J, de Jong M, et al. GQA: Training generalized multi-query transformer models from multi-head checkpoints[C]//Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing. 2023: 4895-4901.
+\bibitem{ref24}
+Lewis P, Perez E, Piktus A, et al. Retrieval-augmented generation for knowledge-intensive NLP tasks[C]//Advances in Neural Information Processing Systems. 2020, 33: 9459-9474.
+\bibitem{ref25}
+Dong S, Wang L, Du B, et al. ChangeCLIP: Remote sensing change detection with multimodal vision-language representation learning[J]. ISPRS Journal of Photogrammetry and Remote Sensing, 2024, 208: 53-69.
+\bibitem{ref26}
+Liu C, Zhao R, Chen H, et al. Remote sensing image change captioning with dual-branch transformers: A new method and a large scale dataset[J]. IEEE Transactions on Geoscience and Remote Sensing, 2022, 60: 5633520.
+\bibitem{ref27}
+Shi Y, Yang R, Yin C, et al. MV-S2CD: A modality-bridged vision foundation model-based framework for unsupervised optical-SAR change detection[J]. Remote Sensing, 2026, 18: 931.
+\bibitem{ref28}
+Li D, Chu P, Yang C, et al. ChangeVLM: A language-guided semantic alignment framework for binary remote sensing change detection[J]. Remote Sensing, 2026, 18: 1671.
+\bibitem{ref29}
+Hu E J, Shen Y, Wallis P, et al. LoRA: Low-rank adaptation of large language models[C]//Proceedings of the ICLR 2022 Conference. PMLR, 2022: 3.
+\bibitem{ref30}
+Dettmers T, Holtzman A, Pagnoni A, et al. QLoRA: Efficient finetuning of quantized LLMs[C]//Advances in Neural Information Processing Systems. 2023, 36: 10088-10115.
+\bibitem{ref31}
+Cheng G, Han J, Zhou P, et al. Multi-class geospatial object detection and geographic image classification based on collection of part detectors[J]. ISPRS Journal of Photogrammetry and Remote Sensing, 2014, 98: 119-132.
+
+\end{thebibliography}
+
+\PublishersNote{}
+\end{adjustwidth}
+\end{document}

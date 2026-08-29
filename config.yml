@@ -1,0 +1,22 @@
+is_test: 'FALSE'
+llm:
+  FM9G4BV:
+    api_key: null
+    base_url: /home/user01/PythonProject/CPM-9G-8B/FM9G4B-V/checkpoint/FM9G4BV-RS
+    model_name: FM9G4B-V
+  provider: FM9G4BV
+rag:
+  doc_path: /home/user01/PythonProject/CPM-9G-8B/FM9G4B-V/RAG_docs
+  embedding_model_path: /home/user01/PythonProject/CPM-9G-8B/FM9G4B-V/checkpoint/BAAI/bge-base-zh-v1.5
+  vector:
+    chromadb:
+      vector_name: chromadb
+    milvus:
+      host: 127.0.0.1
+      local_save_dir: /root/milvus
+      port: 3306
+      vector_name: milvus
+    provider: chromadb
+test_mode: false
+ui:
+  language: zh-CN

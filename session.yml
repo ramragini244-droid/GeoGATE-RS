@@ -1,0 +1,23 @@
+iimage_detect_sample_repetition_penalty: 1280
+image_beam_repetition_penalty: 1280
+image_detect_decode_type: Beam Search
+image_detect_num_beams: 720
+image_detect_temperature: 1280
+image_detect_top_k: 1280
+image_detect_top_p: 720
+rag_beam_repetition_penalty: 1280
+rag_decode_type: Beam Search
+rag_num_beams: 720
+rag_sample_repetition_penalty: 1280
+rag_temperature: 1280
+rag_top_k: 1280
+rag_top_p: 720
+rag_vector_db: Chromdb
+ui_language: "zh-CN - \u7B80\u4F53\u4E2D\u6587"
+vdeio_detect_decode_type: Beam Search
+vdeio_detect_num_beams: 720
+vdeio_detect_sample_repetition_penalty: 1280
+vdeio_detect_temperature: 1280
+vdeio_detect_top_k: 1280
+vdeio_detect_top_p: 720
+video_beam_repetition_penalty: 1280
